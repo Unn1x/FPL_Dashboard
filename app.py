@@ -16,6 +16,10 @@ def load_data():
     elements = pd.DataFrame(data["elements"])
     teams = pd.DataFrame(data["teams"])
     element_types = pd.DataFrame(data["element_types"])
+    events = pd.DataFrame(data["events"])
+
+    # Detect current GW
+    current_gw = int(events[events["is_current"] == True]["id"].iloc[0]) if not events[events["is_current"] == True].empty else 1
 
     # Fixtures
     fixtures = requests.get(f"{base}/fixtures/").json()
@@ -65,8 +69,9 @@ def load_data():
     for c in fdr_text_cols + fdr_num_cols:
         df[c] = None
 
-    # Keep only fixtures with a GW number, sorted by GW
+    # Keep only fixtures with a GW number >= current GW, sorted by GW
     fix = fixtures_df[fixtures_df["event"].notna()].copy()
+    fix = fix[fix["event"] >= current_gw]
     fix = fix.sort_values(["event", "kickoff_time"], na_position="last")
 
     # For each team, collect next N opponents with correct difficulty
@@ -223,6 +228,7 @@ with tabs[4]:
         .loc[:, ["name", "team_name", "position", "cost", "form", "points_per_game", "selected_by_percent"]]
         .head(12)
     )
+    best_transfers.insert(0, "Rank", range(1, len(best_transfers)+1))
 
     st.markdown("### 🔥 Best Transfers In (next 3 GWs weighted by form & PPG)")
     st.dataframe(
@@ -246,17 +252,21 @@ with tabs[4]:
     top_overall = work.sort_values("captain_score", ascending=False).head(3)[
         ["name", "team_name", "position", "form", "points_per_game", "selected_by_percent"]
     ]
+    top_overall.insert(0, "Rank", range(1, len(top_overall)+1))
 
     # Top 3 from current squad
     in_squad = work[work["name"].isin(current_players)].copy()
     top_squad = in_squad.sort_values("captain_score", ascending=False).head(3)[
         ["name", "team_name", "position", "form", "points_per_game", "selected_by_percent"]
     ] if not in_squad.empty else pd.DataFrame()
+    if not top_squad.empty:
+        top_squad.insert(0, "Rank", range(1, len(top_squad)+1))
 
     # Top 3 most selected
     top_selected = work.sort_values("selected_by_percent", ascending=False).head(3)[
         ["name", "team_name", "position", "form", "points_per_game", "selected_by_percent"]
     ]
+    top_selected.insert(0, "Rank", range(1, len(top_selected)+1))
 
     st.markdown("### 🏆 Captaincy Recommendations")
     st.write("**Top 3 Overall**")
@@ -293,6 +303,7 @@ with tabs[4]:
     diffs = diffs.sort_values("diff_score", ascending=False).loc[
         :, ["name", "team_name", "position", "selected_by_percent", "form", "points_per_game"]
     ].head(10)
+    diffs.insert(0, "Rank", range(1, len(diffs)+1))
 
     st.markdown("### 🎯 Differential Picks (≤15% selected, good form/PPG, kind fixtures)")
     st.dataframe(
@@ -310,6 +321,7 @@ with tabs[4]:
     budget = budget.sort_values("budget_score", ascending=False).loc[
         :, ["name", "team_name", "position", "cost", "points_per_game", "form"]
     ].head(12)
+    budget.insert(0, "Rank", range(1, len(budget)+1))
 
     st.markdown("### 💰 Budget Enablers (≤ £5.0)")
     st.dataframe(

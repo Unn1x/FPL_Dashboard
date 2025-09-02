@@ -34,8 +34,25 @@ def ensure_user_squad_file(username):
             json.dump(base, f)
     return fn
 
-def fdr_color_from_text(_val: str):
-    return ""
+def fdr_color_from_text(val):
+    """Return background color for FDR difficulty (1-5)."""
+    try:
+        val_int = int(val) if val is not None and val != "" else None
+    except:
+        val_int = None
+    if val_int == 1:
+        color = "#a6f1a6"  # green
+    elif val_int == 2:
+        color = "#ccf0a6"  # light green
+    elif val_int == 3:
+        color = "#ffff99"  # yellow
+    elif val_int == 4:
+        color = "#ffb366"  # orange
+    elif val_int == 5:
+        color = "#ff6666"  # red
+    else:
+        color = ""  # default
+    return f"background-color: {color}"
 
 # ----------------------------
 # Load FPL data (cached)
@@ -106,7 +123,7 @@ def load_data():
     except Exception:
         current_gw = None
 
-    # Build candidate fixtures that are "upcoming"
+    # Build candidate fixtures
     fix = fixtures_df[fixtures_df["event"].notna()].copy()
     fix["is_upcoming"] = (~fix.get("finished", False).fillna(False)) | (fix["kickoff_dt"].notna() & (fix["kickoff_dt"] >= now_utc))
     if current_gw is not None:
@@ -127,7 +144,7 @@ def load_data():
             team_next[th].append((team_map.get(ta, ""), dh))
             team_next[ta].append((team_map.get(th, ""), da))
 
-    # Fallback for teams with no upcoming fixtures
+    # Fallback for missing teams
     for team_id in teams["id"].tolist():
         if team_id not in team_next or len(team_next[team_id]) == 0:
             team_future = fixtures_df[
@@ -182,7 +199,7 @@ tabs = st.tabs([
 ])
 
 # ----------------------------
-# Positional Tabs
+# Positional Tabs (with FDR colors)
 # ----------------------------
 pos_order = ["Goalkeepers", "Defenders", "Midfielders", "Forwards"]
 for tab, pos in zip(tabs[:4], pos_order):
@@ -195,18 +212,13 @@ for tab, pos in zip(tabs[:4], pos_order):
             + fdr_text_cols
         )
         show_cols = [c for c in show_cols if c in df_pos.columns]
-
-        styled = (
-            df_pos[show_cols]
-            .style.applymap(fdr_color_from_text, subset=fdr_text_cols)
-            .format({
-                "cost": "{:.1f}",
-                "selected_by_percent": "{:.1f}",
-                "form": "{:.1f}",
-                "points_per_game": "{:.1f}",
-                "points_per_90": "{:.1f}"
-            })
-        )
+        styled = df_pos[show_cols].style.applymap(fdr_color_from_text, subset=fdr_text_cols).format({
+            "cost": "{:.1f}",
+            "selected_by_percent": "{:.1f}",
+            "form": "{:.1f}",
+            "points_per_game": "{:.1f}",
+            "points_per_90": "{:.1f}"
+        })
         st.dataframe(styled, use_container_width=True)
 
 # ----------------------------
@@ -224,7 +236,7 @@ with tabs[5]:
                 loaded = json.load(f)
                 if isinstance(loaded, dict):
                     my_squad = loaded
-        except Exception:
+        except:
             my_squad = {}
 
     for pos, slots in pos_slots.items():
@@ -254,46 +266,42 @@ with tabs[5]:
 current_players = [p for pos in pos_order for p in my_squad.get(pos, []) if p]
 
 # ----------------------------
-# GW Insights tab
+# GW Insights tab (element_type removed)
 # ----------------------------
 with tabs[4]:
     st.subheader("📊 Gameweek Insights")
 
-    def avg_next3(series_row):
-        vals = [series_row[c] for c in fdr_num_cols[:3] if c in series_row.index and series_row[c] is not None]
-        return sum(vals) / len(vals) if vals else None
+    def avg_next3(row):
+        vals = [row[c] for c in fdr_num_cols[:3] if c in row.index and row[c] is not None]
+        return sum(vals)/len(vals) if vals else None
 
     work = df.copy()
     work["avg_next3_fdr"] = work.apply(avg_next3, axis=1)
 
     # Suggested Transfers
     candidates = work[~work["name"].isin(current_players)].copy()
-    candidates["transfer_score"] = (
-        candidates["points_per_game"] * 0.55 +
-        candidates["form"] * 0.45 -
-        candidates["avg_next3_fdr"].fillna(3.0) * 0.35
-    )
+    candidates["transfer_score"] = candidates["points_per_game"]*0.55 + candidates["form"]*0.45 - candidates["avg_next3_fdr"].fillna(3.0)*0.35
     best_transfers = candidates.sort_values("transfer_score", ascending=False).head(12)
     best_transfers.insert(0, "Rank", range(1, len(best_transfers)+1))
     st.markdown("### 🔥 Best Transfers In (ranked)")
-    st.dataframe(best_transfers, use_container_width=True)
+    st.dataframe(best_transfers.drop(columns=["element_type"]), use_container_width=True)
 
     # Captaincy pick
     top_captains = work.sort_values("points_per_game", ascending=False).head(10)
     st.markdown("### 👑 Captaincy Picks")
-    st.dataframe(top_captains[["name", "team_name", "points_per_game", "form"]], use_container_width=True)
+    st.dataframe(top_captains.drop(columns=["element_type"])[["name","team_name","points_per_game","form"]], use_container_width=True)
 
     # Top Selected
     top_selected = work.sort_values("selected_by_percent", ascending=False).head(10)
     st.markdown("### 📈 Top Selected Players")
-    st.dataframe(top_selected[["name", "team_name", "selected_by_percent"]], use_container_width=True)
+    st.dataframe(top_selected.drop(columns=["element_type"])[["name","team_name","selected_by_percent"]], use_container_width=True)
 
-    # Differential picks (low selected by percent)
+    # Differential picks
     diff_players = work[work["selected_by_percent"] < 5].sort_values("points_per_game", ascending=False).head(10)
     st.markdown("### ⚡ Differential Players (<5% selected)")
-    st.dataframe(diff_players[["name", "team_name", "points_per_game", "selected_by_percent"]], use_container_width=True)
+    st.dataframe(diff_players.drop(columns=["element_type"])[["name","team_name","points_per_game","selected_by_percent"]], use_container_width=True)
 
-    # Budget Enablers (<6.0)
+    # Budget Enablers
     budget_enablers = work[work["cost"] <= 6.0].sort_values("points_per_game", ascending=False).head(10)
     st.markdown("### 💰 Budget Enablers (≤6.0)")
-    st.dataframe(budget_enablers[["name", "team_name", "cost", "points_per_game"]], use_container_width=True)
+    st.dataframe(budget_enablers.drop(columns=["element_type"])[["name","team_name","cost","points_per_game"]], use_container_width=True)

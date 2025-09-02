@@ -170,7 +170,7 @@ if "username" not in st.session_state:
         st.session_state.username = username_input.strip()
         # ensure a per-user file exists
         ensure_user_squad_file(st.session_state.username)
-        st.experimental_rerun()
+        st.rerun()
     st.stop()  # wait until a username is provided
 
 username = st.session_state.username

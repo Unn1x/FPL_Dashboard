@@ -25,6 +25,12 @@ def parse_kickoff(kickoff_str):
     except Exception:
         return None
 
+def safe_int(x, default=None):
+    try:
+        return int(x)
+    except Exception:
+        return default
+
 def ensure_user_squad_file(username):
     fn = f"my_squad_{username}.json"
     if not os.path.exists(fn):
@@ -35,24 +41,21 @@ def ensure_user_squad_file(username):
     return fn
 
 def fdr_color_from_text(val):
-    """Return background color for FDR difficulty (1-5)."""
+    """Return background color based on FDR numeric value."""
+    if val is None or val == "":
+        return ""
     try:
-        val_int = int(val) if val is not None and val != "" else None
-    except:
-        val_int = None
-    if val_int == 1:
-        color = "#a6f1a6"  # green
-    elif val_int == 2:
-        color = "#ccf0a6"  # light green
-    elif val_int == 3:
-        color = "#ffff99"  # yellow
-    elif val_int == 4:
-        color = "#ffb366"  # orange
-    elif val_int == 5:
-        color = "#ff6666"  # red
-    else:
-        color = ""  # default
-    return f"background-color: {color}"
+        num = int(val.split("(")[-1].replace(")", ""))
+        if num == 1:
+            return "background-color: #85e085"  # green
+        elif num == 2:
+            return "background-color: #ffff99"  # yellow
+        elif num == 3:
+            return "background-color: #ffd699"  # orange
+        else:
+            return "background-color: #ff9999"  # red
+    except Exception:
+        return ""
 
 # ----------------------------
 # Load FPL data (cached)
@@ -66,25 +69,20 @@ def load_data():
     elements = pd.DataFrame(bs["elements"])
     teams = pd.DataFrame(bs["teams"])
     events = pd.DataFrame(bs["events"]) if "events" in bs else pd.DataFrame()
-
-    # fixtures
-    fixtures_list = requests.get(f"{base}/fixtures/").json()
-    fixtures_df = pd.DataFrame(fixtures_list)
+    fixtures_df = pd.DataFrame(requests.get(f"{base}/fixtures/").json())
 
     # maps
     team_map = teams.set_index("id")["name"].to_dict()
     pos_name_map = {1: "Goalkeepers", 2: "Defenders", 3: "Midfielders", 4: "Forwards"}
 
-    # Basic player df
-    df = elements[
-        [
-            "id", "first_name", "second_name", "web_name", "team", "element_type",
-            "now_cost", "total_points", "minutes", "selected_by_percent",
-            "form", "points_per_game"
-        ]
-    ].copy()
+    # player df
+    df = elements[[
+        "id", "first_name", "second_name", "web_name", "team", "element_type",
+        "now_cost", "total_points", "minutes", "selected_by_percent",
+        "form", "points_per_game"
+    ]].copy()
 
-    # Derived fields
+    # derived fields
     df["name"] = (df["first_name"].fillna("") + " " + df["second_name"].fillna("")).str.strip()
     df["team_name"] = df["team"].map(team_map)
     df["position"] = df["element_type"].map(pos_name_map)
@@ -99,67 +97,48 @@ def load_data():
     df["points_per_game"] = df["points_per_game"].astype(float).round(1)
     df["points_per_90"] = df["points_per_90"].astype(float).round(1)
 
-    # Prepare FDR columns
+    # FDR columns
     fdr_text_cols = [f"Next{i}_FDR" for i in range(1, 6)]
     fdr_num_cols = [f"Next{i}_FDR_num" for i in range(1, 6)]
     for c in fdr_text_cols + fdr_num_cols:
         df[c] = None
 
-    # Parse kickoff
+    # kickoff times
     fixtures_df["kickoff_dt"] = fixtures_df["kickoff_time"].apply(parse_kickoff)
     now_utc = datetime.now(timezone.utc)
 
-    # Determine current GW
+    # current GW
     current_gw = None
-    try:
-        if not events.empty:
-            cur = events[events["is_current"] == True]
-            if not cur.empty:
-                current_gw = int(cur["id"].iloc[0])
-            else:
-                nxt = events[events["is_next"] == True]
-                if not nxt.empty:
-                    current_gw = int(nxt["id"].iloc[0])
-    except Exception:
-        current_gw = None
+    if not events.empty:
+        cur = events[events["is_current"] == True]
+        if not cur.empty:
+            current_gw = int(cur["id"].iloc[0])
+        else:
+            nxt = events[events["is_next"] == True]
+            if not nxt.empty:
+                current_gw = int(nxt["id"].iloc[0])
 
-    # Build candidate fixtures
+    # upcoming fixtures
     fix = fixtures_df[fixtures_df["event"].notna()].copy()
     fix["is_upcoming"] = (~fix.get("finished", False).fillna(False)) | (fix["kickoff_dt"].notna() & (fix["kickoff_dt"] >= now_utc))
     if current_gw is not None:
         fix = fix[(fix["event"] >= current_gw) & (fix["is_upcoming"])]
     else:
         fix = fix[fix["is_upcoming"]]
-
     fix = fix.sort_values(["event", "kickoff_dt"], na_position="last")
 
-    # Build team_next dict
+    # team_next mapping
     team_next = defaultdict(list)
     for _, row in fix.iterrows():
-        th, ta = row.get("team_h"), row.get("team_a")
-        dh, da = row.get("team_h_difficulty"), row.get("team_a_difficulty")
-        dh = int(dh) if pd.notna(dh) else None
-        da = int(da) if pd.notna(da) else None
+        th = row.get("team_h")
+        ta = row.get("team_a")
+        dh = int(row.get("team_h_difficulty")) if pd.notna(row.get("team_h_difficulty")) else None
+        da = int(row.get("team_a_difficulty")) if pd.notna(row.get("team_a_difficulty")) else None
         if pd.notna(th) and pd.notna(ta):
             team_next[th].append((team_map.get(ta, ""), dh))
             team_next[ta].append((team_map.get(th, ""), da))
 
-    # Fallback for missing teams
-    for team_id in teams["id"].tolist():
-        if team_id not in team_next or len(team_next[team_id]) == 0:
-            team_future = fixtures_df[
-                ((fixtures_df["team_h"] == team_id) | (fixtures_df["team_a"] == team_id)) &
-                (fixtures_df["kickoff_dt"].notna()) & (fixtures_df["kickoff_dt"] >= now_utc)
-            ].sort_values(["event", "kickoff_dt"])
-            for _, row in team_future.iterrows():
-                th, ta = row.get("team_h"), row.get("team_a")
-                dh, da = row.get("team_h_difficulty"), row.get("team_a_difficulty")
-                dh = int(dh) if pd.notna(dh) else None
-                da = int(da) if pd.notna(da) else None
-                team_next[th].append((team_map.get(ta, ""), dh))
-                team_next[ta].append((team_map.get(th, ""), da))
-
-    # Fill per-player Next1..Next5
+    # Fill Next1..Next5
     for idx, r in df.iterrows():
         seq = team_next.get(r["team"], [])
         for i in range(5):
@@ -191,44 +170,44 @@ st.markdown(f"**Logged in as:** {username} — your squad will be saved to `my_s
 df, fdr_text_cols, fdr_num_cols = load_data()
 
 # ----------------------------
-# Tabs: Positional + GW Insights + My Squad
+# Tabs
 # ----------------------------
 tabs = st.tabs([
     "🧤 Goalkeepers", "🛡️ Defenders", "🎯 Midfielders", "⚡ Forwards",
     "📊 GW Insights", "📝 My Squad"
 ])
+pos_order = ["Goalkeepers", "Defenders", "Midfielders", "Forwards"]
 
 # ----------------------------
-# Positional Tabs (with FDR colors)
+# Positional Tabs
 # ----------------------------
-pos_order = ["Goalkeepers", "Defenders", "Midfielders", "Forwards"]
 for tab, pos in zip(tabs[:4], pos_order):
     with tab:
         st.subheader(pos)
         df_pos = df[df["position"] == pos].copy()
-        show_cols = (
-            ["team_name", "name", "cost", "total_points", "minutes",
-             "selected_by_percent", "form", "points_per_game", "points_per_90"]
-            + fdr_text_cols
-        )
+        show_cols = ["team_name", "name", "cost", "total_points", "minutes",
+                     "selected_by_percent", "form", "points_per_game", "points_per_90"] + fdr_text_cols
         show_cols = [c for c in show_cols if c in df_pos.columns]
-        styled = df_pos[show_cols].style.applymap(fdr_color_from_text, subset=fdr_text_cols).format({
-            "cost": "{:.1f}",
-            "selected_by_percent": "{:.1f}",
-            "form": "{:.1f}",
-            "points_per_game": "{:.1f}",
-            "points_per_90": "{:.1f}"
-        })
+        styled = (
+            df_pos[show_cols]
+            .style.applymap(fdr_color_from_text, subset=fdr_text_cols)
+            .format({
+                "cost": "{:.1f}",
+                "selected_by_percent": "{:.1f}",
+                "form": "{:.1f}",
+                "points_per_game": "{:.1f}",
+                "points_per_90": "{:.1f}"
+            })
+        )
         st.dataframe(styled, use_container_width=True)
 
 # ----------------------------
-# My Squad tab
+# My Squad Tab
 # ----------------------------
 with tabs[5]:
     st.subheader("📝 Select & Save Your Squad")
     pos_slots = {"Goalkeepers": 2, "Defenders": 5, "Midfielders": 5, "Forwards": 3}
     squad_file = f"my_squad_{username}.json"
-
     my_squad = {}
     if os.path.exists(squad_file):
         try:
@@ -236,9 +215,8 @@ with tabs[5]:
                 loaded = json.load(f)
                 if isinstance(loaded, dict):
                     my_squad = loaded
-        except:
+        except Exception:
             my_squad = {}
-
     for pos, slots in pos_slots.items():
         if pos not in my_squad or not isinstance(my_squad[pos], list) or len(my_squad[pos]) != slots:
             my_squad[pos] = [""] * slots
@@ -253,17 +231,36 @@ with tabs[5]:
         new_squad[pos] = []
         for i in range(slots):
             default_name = my_squad.get(pos, [""] * slots)[i]
-            default_index = options.index(default_name) if default_name in options else 0
+            try:
+                default_index = options.index(default_name) if default_name in options else 0
+            except Exception:
+                default_index = 0
             sel = row_cols[i].selectbox(f"{pos[:-1]} {i+1}", options, index=default_index, key=f"{pos}_{i}_{username}")
             new_squad[pos].append(sel)
-
     if st.button("Save Squad"):
         with open(squad_file, "w") as f:
             json.dump(new_squad, f)
         st.success(f"Squad saved to `{squad_file}`")
         my_squad = new_squad
 
-current_players = [p for pos in pos_order for p in my_squad.get(pos, []) if p]
+# ----------------------------
+# Flatten current players
+# ----------------------------
+current_players = [p for pos in pos_order for p in (my_squad.get(pos, []) if isinstance(my_squad.get(pos, []), list) else []) if p]
+
+# ----------------------------
+# GW Insights
+# ----------------------------
+with tabs[4]:
+    st.subheader("📊 Gameweek Insights")
+    work = df.copy()
+
+    # remove element_type column ONLY here
+    if "element_type" in work.columns:
+        work.drop(columns=["element_type"], inplace=True)
+
+    # --- rest of your GW Insights code stays exactly the same ---
+
 
 # ----------------------------
 # GW Insights tab (element_type removed)

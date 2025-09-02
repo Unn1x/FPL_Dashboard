@@ -25,6 +25,12 @@ def parse_kickoff(kickoff_str):
     except Exception:
         return None
 
+def safe_int(x, default=None):
+    try:
+        return int(x)
+    except Exception:
+        return default
+
 def ensure_user_squad_file(username):
     fn = f"my_squad_{username}.json"
     if not os.path.exists(fn):
@@ -34,24 +40,45 @@ def ensure_user_squad_file(username):
             json.dump(base, f)
     return fn
 
+# ----------------------------
+# FDR coloring helper (text black)
+# ----------------------------
 def fdr_color_from_text(val):
-    try:
-        if val is None or val == "":
-            return ""
-        # parse number inside parentheses
-        if "(" in val and ")" in val:
-            num = int(val.split("(")[1].split(")")[0])
-            if num == 1:
-                return "background-color: #a1d99b; color: black"  # green
-            elif num == 2:
-                return "background-color: #ffffb2; color: black"  # yellow
-            elif num == 3:
-                return "background-color: #fdae6b; color: black"  # orange
-            elif num >= 4:
-                return "background-color: #fcae91; color: black"  # red
-    except Exception:
-        return "color: black"
-    return "color: black"
+    if val is None or val == "":
+        return ""
+    # simple grading based on FDR number in parentheses
+    import re
+    m = re.search(r"\((\d)\)", str(val))
+    if m:
+        fdr = int(m.group(1))
+        if fdr == 1:
+            color = "#b6d7a8"
+        elif fdr == 2:
+            color = "#fff2cc"
+        elif fdr == 3:
+            color = "#f9cb9c"
+        elif fdr == 4:
+            color = "#e06666"
+        else:
+            color = "#990000"
+        return f"background-color: {color}; color: black"
+    return ""
+
+# ----------------------------
+# Login
+# ----------------------------
+if "username" not in st.session_state:
+    st.title("⚽ FPL Winning Tool — Login")
+    st.write("Enter a username to load/save your squad. Each username saves to its own file on this machine.")
+    username_input = st.text_input("Username:")
+    if st.button("Login") and username_input.strip() != "":
+        st.session_state.username = username_input.strip()
+        ensure_user_squad_file(st.session_state.username)
+        st.rerun()
+    st.stop()
+
+username = st.session_state.username
+st.markdown(f"**Logged in as:** {username} — your squad will be saved to `my_squad_{username}.json`")
 
 # ----------------------------
 # Load FPL data
@@ -81,14 +108,11 @@ def load_data():
          "form", "points_per_game"]
     ].copy()
 
-    # Derived fields
     df["name"] = (df["first_name"].fillna("") + " " + df["second_name"].fillna("")).str.strip()
     df["team_name"] = df["team"].map(team_map)
     df["position"] = df["element_type"].map(pos_name_map)
     df["cost"] = (df["now_cost"] / 10).round(1)
     df["points_per_90"] = df.apply(lambda r: (r["total_points"] / (r["minutes"] / 90)) if r["minutes"] > 0 else 0.0, axis=1)
-
-    # tidy numeric
     df["total_points"] = df["total_points"].astype(int)
     df["minutes"] = df["minutes"].astype(int)
     df["selected_by_percent"] = df["selected_by_percent"].astype(float).round(1)
@@ -96,17 +120,16 @@ def load_data():
     df["points_per_game"] = df["points_per_game"].astype(float).round(1)
     df["points_per_90"] = df["points_per_90"].astype(float).round(1)
 
-    # FDR columns
     fdr_text_cols = [f"Next{i}_FDR" for i in range(1, 6)]
     fdr_num_cols = [f"Next{i}_FDR_num" for i in range(1, 6)]
     for c in fdr_text_cols + fdr_num_cols:
         df[c] = None
 
-    # parse kickoff times
+    # Parse kickoff times
     fixtures_df["kickoff_dt"] = fixtures_df["kickoff_time"].apply(parse_kickoff)
     now_utc = datetime.now(timezone.utc)
 
-    # current GW
+    # Determine current GW
     current_gw = None
     try:
         if not events.empty:
@@ -127,21 +150,22 @@ def load_data():
         fix = fix[(fix["event"] >= current_gw) & (fix["is_upcoming"])]
     else:
         fix = fix[fix["is_upcoming"]]
+
     fix = fix.sort_values(["event", "kickoff_dt"], na_position="last")
 
-    # Build team_next
+    # Build team_next dict
     team_next = defaultdict(list)
     for _, row in fix.iterrows():
         th = row.get("team_h")
         ta = row.get("team_a")
-        dh = int(row["team_h_difficulty"]) if pd.notna(row["team_h_difficulty"]) else None
-        da = int(row["team_a_difficulty"]) if pd.notna(row["team_a_difficulty"]) else None
+        dh = int(row.get("team_h_difficulty")) if pd.notna(row.get("team_h_difficulty")) else None
+        da = int(row.get("team_a_difficulty")) if pd.notna(row.get("team_a_difficulty")) else None
         if pd.notna(th) and pd.notna(ta):
             team_next[th].append((team_map.get(ta, ""), dh))
             team_next[ta].append((team_map.get(th, ""), da))
 
-    # fallback for teams with no upcoming fixtures
-    for team_id in teams["id"]:
+    # Fallback for teams with no upcoming fixtures
+    for team_id in teams["id"].tolist():
         if team_id not in team_next or len(team_next[team_id]) == 0:
             team_future = fixtures_df[
                 ((fixtures_df["team_h"] == team_id) | (fixtures_df["team_a"] == team_id)) &
@@ -150,8 +174,8 @@ def load_data():
             for _, row in team_future.iterrows():
                 th = row.get("team_h")
                 ta = row.get("team_a")
-                dh = int(row["team_h_difficulty"]) if pd.notna(row["team_h_difficulty"]) else None
-                da = int(row["team_a_difficulty"]) if pd.notna(row["team_a_difficulty"]) else None
+                dh = int(row.get("team_h_difficulty")) if pd.notna(row.get("team_h_difficulty")) else None
+                da = int(row.get("team_a_difficulty")) if pd.notna(row.get("team_a_difficulty")) else None
                 if pd.notna(th) and pd.notna(ta):
                     team_next[th].append((team_map.get(ta, ""), dh))
                     team_next[ta].append((team_map.get(th, ""), da))
@@ -165,6 +189,25 @@ def load_data():
             df.at[idx, f"Next{i+1}_FDR_num"] = fdr if fdr is not None else None
 
     return df, fdr_text_cols, fdr_num_cols
+
+# ----------------------------
+# Load data
+# ----------------------------
+df, fdr_text_cols, fdr_num_cols = load_data()
+
+# ----------------------------
+# Compute avg_next3_fdr to prevent KeyError
+# ----------------------------
+def avg_next3(series_row):
+    vals = []
+    for c in fdr_num_cols[:3]:
+        if c in series_row.index:
+            v = series_row[c]
+            if v is not None:
+                vals.append(v)
+    return sum(vals) / len(vals) if vals else None
+
+df["avg_next3_fdr"] = df.apply(avg_next3, axis=1)
 
 # ----------------------------
 # Login

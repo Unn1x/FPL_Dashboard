@@ -46,7 +46,6 @@ def ensure_user_squad_file(username):
 def fdr_color_from_text(val):
     if val is None or val == "":
         return ""
-    # simple grading based on FDR number in parentheses
     import re
     m = re.search(r"\((\d)\)", str(val))
     if m:
@@ -78,7 +77,7 @@ if "username" not in st.session_state:
     st.stop()
 
 username = st.session_state.username
-st.markdown(f"**Logged in as:** {username} — your squad will be saved to `my_squad_{username}.json`")
+st.markdown(f"**Logged in as:** {username}")
 
 # ----------------------------
 # Load FPL data
@@ -210,27 +209,6 @@ def avg_next3(series_row):
 df["avg_next3_fdr"] = df.apply(avg_next3, axis=1)
 
 # ----------------------------
-# Login
-# ----------------------------
-if "username" not in st.session_state:
-    st.title("⚽ FPL Winning Tool — Login")
-    st.write("Enter a username to load/save your squad. Each username saves to its own file on this machine.")
-    username_input = st.text_input("Username:")
-    if st.button("Login") and username_input.strip() != "":
-        st.session_state.username = username_input.strip()
-        ensure_user_squad_file(st.session_state.username)
-        st.rerun()
-    st.stop()
-
-username = st.session_state.username
-st.markdown(f"**Logged in as:** {username}")
-
-# ----------------------------
-# Load data
-# ----------------------------
-df, fdr_text_cols, fdr_num_cols = load_data()
-
-# ----------------------------
 # Tabs
 # ----------------------------
 tabs = st.tabs(["🧤 Goalkeepers", "🛡️ Defenders", "🎯 Midfielders", "⚡ Forwards",
@@ -306,30 +284,23 @@ current_players = [p for pos in pos_order for p in (my_squad.get(pos, []) if isi
 with tabs[4]:
     st.subheader("📊 Gameweek Insights")
     work = df.copy()
+
     # remove element_type from table
-    def avg_next3(series_row):
-        vals = []
-        for c in fdr_num_cols[:3]:
-            v = series_row.get(c, None)
-            if v is not None:
-                vals.append(v)
-        return sum(vals) / len(vals) if vals else None
     work["Average Next 3 Difficulty Rating"] = work.apply(avg_next3, axis=1)
 
     # Suggested Transfers
-candidates = work[~work["name"].isin(current_players)].copy()
+    candidates = work[~work["name"].isin(current_players)].copy()
 
-# Ensure avg_next3_fdr exists
-if "avg_next3_fdr" not in candidates.columns:
-    candidates["avg_next3_fdr"] = candidates.apply(avg_next3, axis=1)
+    # Ensure avg_next3_fdr exists
+    if "avg_next3_fdr" not in candidates.columns:
+        candidates["avg_next3_fdr"] = candidates.apply(avg_next3, axis=1)
 
-candidates["transfer_score"] = (
-    candidates["points_per_game"] * 0.55
-    + candidates["form"] * 0.45
-    - candidates["avg_next3_fdr"].fillna(3.0) * 0.35
-)
+    candidates["transfer_score"] = (
+        candidates["points_per_game"] * 0.55
+        + candidates["form"] * 0.45
+        - candidates["avg_next3_fdr"].fillna(3.0) * 0.35
+    )
 
-    
     best_transfers = candidates.sort_values("transfer_score", ascending=False).loc[:, [
         "name", "team_name", "position", "cost", "form", "points_per_game", "selected_by_percent", "avg_next3_fdr"
     ]].head(12).reset_index(drop=True)

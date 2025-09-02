@@ -4,24 +4,41 @@ import streamlit as st
 import json
 import os
 import re
+from datetime import datetime, timezone
 
 # ----------------------------
-# Load FPL Data
+# Config
 # ----------------------------
-@st.cache_data
+st.set_page_config(page_title="FPL Dashboard", layout="wide")
+st.title("⚽ FPL Winning Tool")
+
+# ----------------------------
+# Helpers
+# ----------------------------
+def safe_float(x, default=None):
+    try:
+        return float(x)
+    except Exception:
+        return default
+
+# Color styling disabled (kept as hook)
+def fdr_color_from_text(_val: str):
+    return ""
+
+# ----------------------------
+# Load FPL Data (cached)
+# ----------------------------
+@st.cache_data(ttl=300, show_spinner=False)  # cache for 5 minutes
 def load_data():
-    # Bootstrap data
     base = "https://fantasy.premierleague.com/api"
+
+    # Bootstrap
     data = requests.get(f"{base}/bootstrap-static/").json()
     elements = pd.DataFrame(data["elements"])
     teams = pd.DataFrame(data["teams"])
-    element_types = pd.DataFrame(data["element_types"])
-    events = pd.DataFrame(data["events"])
+    # element_types = pd.DataFrame(data["element_types"])  # not used directly
 
-    # Detect current GW
-    current_gw = int(events[events["is_current"] == True]["id"].iloc[0]) if not events[events["is_current"] == True].empty else 1
-
-    # Fixtures
+    # Fixtures (all season)
     fixtures = requests.get(f"{base}/fixtures/").json()
     fixtures_df = pd.DataFrame(fixtures)
 
@@ -69,21 +86,47 @@ def load_data():
     for c in fdr_text_cols + fdr_num_cols:
         df[c] = None
 
-    # Keep only fixtures with a GW number >= current GW, sorted by GW
-    fix = fixtures_df[fixtures_df["event"].notna()].copy()
-    fix = fix[fix["event"] >= current_gw]
-    fix = fix.sort_values(["event", "kickoff_time"], na_position="last")
+    # Normalize datetime and keep only *upcoming* fixtures.
+    # Use 'finished' flag primarily; fallback to kickoff_time >= now for safety.
+    fix = fixtures_df.copy()
 
-    # For each team, collect next N opponents with correct difficulty
+    # Parse kickoff_time to aware UTC datetime (some rows can be None)
+    def parse_kt(x):
+        if pd.isna(x) or not isinstance(x, str):
+            return None
+        try:
+            # FPL returns ISO strings in UTC (e.g. "2025-09-14T15:30:00Z")
+            return datetime.fromisoformat(x.replace("Z", "+00:00"))
+        except Exception:
+            return None
+
+    fix["kickoff_dt"] = fix["kickoff_time"].apply(parse_kt)
+    now_utc = datetime.now(timezone.utc)
+
+    # Keep only fixtures that belong to a GW and are not finished.
+    # If 'finished' is missing, use kickoff time in the future.
+    not_finished_mask = (~fix.get("finished", False).fillna(False)) | (fix["kickoff_dt"] >= now_utc)
+    fix = fix[fix["event"].notna() & not_finished_mask].copy()
+
+    # Sort strictly by kickoff time to guarantee correct next-up ordering
+    fix = fix.sort_values(["kickoff_dt", "event"], na_position="last")
+
+    # Build upcoming list per team with correct home/away difficulty
     from collections import defaultdict
     team_next = defaultdict(list)  # team_id -> list of (opp_name, fdr_int)
 
     for _, row in fix.iterrows():
         th, ta = row["team_h"], row["team_a"]
-        dh, da = row["team_h_difficulty"], row["team_a_difficulty"]
+        dh = row.get("team_h_difficulty", None)
+        da = row.get("team_a_difficulty", None)
 
-        team_next[th].append((team_map.get(ta, ""), int(dh) if pd.notna(dh) else None))
-        team_next[ta].append((team_map.get(th, ""), int(da) if pd.notna(da) else None))
+        dh = int(dh) if pd.notna(dh) else None
+        da = int(da) if pd.notna(da) else None
+
+        # Home perspective
+        team_next[th].append((team_map.get(ta, ""), dh))
+        # Away perspective
+        team_next[ta].append((team_map.get(th, ""), da))
 
     # Fill each player's next 5 based on their team
     for idx, r in df.iterrows():
@@ -96,28 +139,24 @@ def load_data():
     return df, fdr_text_cols, fdr_num_cols
 
 # ----------------------------
-# Styling helpers
+# Username (per-user save)
 # ----------------------------
-def fdr_color_from_text(val: str):
-    """Colour cells based on '(FDR)' at the end of text like 'Opp (3)'. Empty returns no style."""
-    return ""  # Disabled color styling, keep clean
+with st.sidebar:
+    st.markdown("### Settings")
+    username = st.text_input("Enter your username (for your own saved squad):", "")
+    if st.button("🔄 Refresh live data (clear cache)"):
+        st.cache_data.clear()
+        st.experimental_rerun()
 
-# ----------------------------
-# App
-# ----------------------------
-st.set_page_config(page_title="FPL Dashboard", layout="wide")
-st.title("⚽ FPL Winning Tool")
-
-# ----------------------------
-# User login / username
-# ----------------------------
-username = st.text_input("Enter your username to save/load your squad:", "")
 if username:
     squad_file = f"my_squad_{username}.json"
 else:
-    st.warning("Please enter a username to enable saving your squad.")
     squad_file = None
+    st.warning("Enter a username (left sidebar) to enable saving your squad locally to this app.")
 
+# ----------------------------
+# Fetch data
+# ----------------------------
 df, fdr_text_cols, fdr_num_cols = load_data()
 
 # ----------------------------
@@ -200,7 +239,11 @@ with tabs[5]:
         st.success(f"Squad saved for user: {username}")
 
 # Flatten current players for insights
-current_players = [p for pos in pos_order for p in (my_squad.get(pos, []) if isinstance(my_squad.get(pos, []), list) else []) if p]
+current_players = [
+    p for pos in pos_order
+    for p in (my_squad.get(pos, []) if isinstance(my_squad.get(pos, []), list) else [])
+    if p
+]
 
 # ----------------------------
 # GW Insights tab
@@ -225,18 +268,21 @@ with tabs[4]:
     )
     best_transfers = (
         candidates.sort_values("transfer_score", ascending=False)
-        .loc[:, ["name", "team_name", "position", "cost", "form", "points_per_game", "selected_by_percent"]]
+        .loc[:, ["name", "team_name", "position", "cost", "form", "points_per_game", "selected_by_percent", "avg_next3_fdr"]]
         .head(12)
+        .reset_index(drop=True)
     )
-    best_transfers.insert(0, "Rank", range(1, len(best_transfers)+1))
+    best_transfers.insert(0, "Rank", best_transfers.index + 1)
 
-    st.markdown("### 🔥 Best Transfers In (next 3 GWs weighted by form & PPG)")
+    st.markdown("### 🔥 Best Transfers In (ranked by Transfer Score)")
+    st.caption("Higher points/form and kinder next 3 FDR → higher rank")
     st.dataframe(
         best_transfers.style.format({
             "cost": "{:.1f}",
             "form": "{:.1f}",
             "points_per_game": "{:.1f}",
             "selected_by_percent": "{:.1f}",
+            "avg_next3_fdr": "{:.1f}",
         }),
         use_container_width=True
     )
@@ -248,44 +294,50 @@ with tabs[4]:
         - work["avg_next3_fdr"].fillna(3.0) * 0.3
     )
 
-    # Top 3 overall
-    top_overall = work.sort_values("captain_score", ascending=False).head(3)[
-        ["name", "team_name", "position", "form", "points_per_game", "selected_by_percent"]
-    ]
-    top_overall.insert(0, "Rank", range(1, len(top_overall)+1))
+    # Top 10 overall with ranks (show 10 so you can see ordering clearly)
+    top_overall = (
+        work.sort_values("captain_score", ascending=False)
+        .loc[:, ["name", "team_name", "position", "form", "points_per_game", "selected_by_percent", "avg_next3_fdr", "captain_score"]]
+        .head(10)
+        .reset_index(drop=True)
+    )
+    top_overall.insert(0, "Rank", top_overall.index + 1)
 
-    # Top 3 from current squad
+    st.markdown("### 🏆 Captaincy — Overall (Top 10, ranked)")
+    st.dataframe(
+        top_overall.style.format({
+            "form": "{:.1f}",
+            "points_per_game": "{:.1f}",
+            "selected_by_percent": "{:.1f}",
+            "avg_next3_fdr": "{:.1f}",
+            "captain_score": "{:.2f}",
+        }),
+        use_container_width=True
+    )
+
+    # Top from your squad (ranked)
     in_squad = work[work["name"].isin(current_players)].copy()
-    top_squad = in_squad.sort_values("captain_score", ascending=False).head(3)[
-        ["name", "team_name", "position", "form", "points_per_game", "selected_by_percent"]
-    ] if not in_squad.empty else pd.DataFrame()
-    if not top_squad.empty:
-        top_squad.insert(0, "Rank", range(1, len(top_squad)+1))
-
-    # Top 3 most selected
-    top_selected = work.sort_values("selected_by_percent", ascending=False).head(3)[
-        ["name", "team_name", "position", "form", "points_per_game", "selected_by_percent"]
-    ]
-    top_selected.insert(0, "Rank", range(1, len(top_selected)+1))
-
-    st.markdown("### 🏆 Captaincy Recommendations")
-    st.write("**Top 3 Overall**")
-    st.dataframe(top_overall.style.format({
-        "form": "{:.1f}", "points_per_game": "{:.1f}", "selected_by_percent": "{:.1f}"
-    }), use_container_width=True)
-
-    st.write("**Top 3 From Your Squad**")
-    if not top_squad.empty:
-        st.dataframe(top_squad.style.format({
-            "form": "{:.1f}", "points_per_game": "{:.1f}", "selected_by_percent": "{:.1f}"
-        }), use_container_width=True)
+    if not in_squad.empty:
+        top_squad = (
+            in_squad.sort_values("captain_score", ascending=False)
+            .loc[:, ["name", "team_name", "position", "form", "points_per_game", "selected_by_percent", "avg_next3_fdr", "captain_score"]]
+            .head(10)
+            .reset_index(drop=True)
+        )
+        top_squad.insert(0, "Rank", top_squad.index + 1)
+        st.markdown("### 🧢 Captaincy — From Your Squad (ranked)")
+        st.dataframe(
+            top_squad.style.format({
+                "form": "{:.1f}",
+                "points_per_game": "{:.1f}",
+                "selected_by_percent": "{:.1f}",
+                "avg_next3_fdr": "{:.1f}",
+                "captain_score": "{:.2f}",
+            }),
+            use_container_width=True
+        )
     else:
-        st.info("No players in your squad yet.")
-
-    st.write("**Top 3 Most Selected by Managers**")
-    st.dataframe(top_selected.style.format({
-        "form": "{:.1f}", "points_per_game": "{:.1f}", "selected_by_percent": "{:.1f}"
-    }), use_container_width=True)
+        st.info("No players selected in your squad yet.")
 
     # ---------- Differentials ----------
     diffs = work[~work["name"].isin(current_players)].copy()
@@ -300,17 +352,22 @@ with tabs[4]:
         + diffs["form"] * 0.4
         - diffs["avg_next3_fdr"].fillna(3.0) * 0.5
     )
-    diffs = diffs.sort_values("diff_score", ascending=False).loc[
-        :, ["name", "team_name", "position", "selected_by_percent", "form", "points_per_game"]
-    ].head(10)
-    diffs.insert(0, "Rank", range(1, len(diffs)+1))
+    diffs = (
+        diffs.sort_values("diff_score", ascending=False)
+        .loc[:, ["name", "team_name", "position", "selected_by_percent", "form", "points_per_game", "avg_next3_fdr", "diff_score"]]
+        .head(10)
+        .reset_index(drop=True)
+    )
+    diffs.insert(0, "Rank", diffs.index + 1)
 
-    st.markdown("### 🎯 Differential Picks (≤15% selected, good form/PPG, kind fixtures)")
+    st.markdown("### 🎯 Differentials (≤15% selected, good form/PPG, kind fixtures)")
     st.dataframe(
         diffs.style.format({
             "selected_by_percent": "{:.1f}",
             "form": "{:.1f}",
             "points_per_game": "{:.1f}",
+            "avg_next3_fdr": "{:.1f}",
+            "diff_score": "{:.2f}",
         }),
         use_container_width=True
     )
@@ -318,10 +375,13 @@ with tabs[4]:
     # ---------- Budget Enablers ----------
     budget = work[(~work["name"].isin(current_players)) & (work["cost"] <= 5.0)].copy()
     budget["budget_score"] = budget["points_per_game"] * 0.6 + budget["form"] * 0.4
-    budget = budget.sort_values("budget_score", ascending=False).loc[
-        :, ["name", "team_name", "position", "cost", "points_per_game", "form"]
-    ].head(12)
-    budget.insert(0, "Rank", range(1, len(budget)+1))
+    budget = (
+        budget.sort_values("budget_score", ascending=False)
+        .loc[:, ["name", "team_name", "position", "cost", "points_per_game", "form", "avg_next3_fdr", "budget_score"]]
+        .head(12)
+        .reset_index(drop=True)
+    )
+    budget.insert(0, "Rank", budget.index + 1)
 
     st.markdown("### 💰 Budget Enablers (≤ £5.0)")
     st.dataframe(
@@ -329,6 +389,8 @@ with tabs[4]:
             "cost": "{:.1f}",
             "points_per_game": "{:.1f}",
             "form": "{:.1f}",
+            "avg_next3_fdr": "{:.1f}",
+            "budget_score": "{:.2f}",
         }),
         use_container_width=True
     )

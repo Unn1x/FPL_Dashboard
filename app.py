@@ -317,6 +317,8 @@ with tabs[4]:
     work["Average Next 3 Difficulty Rating"] = work.apply(avg_next3, axis=1)
 
     # Suggested Transfers
+candidates = work[~work["name"].isin(current_players)].copy()
+
 # Ensure avg_next3_fdr exists
 if "avg_next3_fdr" not in candidates.columns:
     candidates["avg_next3_fdr"] = candidates.apply(avg_next3, axis=1)
@@ -327,7 +329,7 @@ candidates["transfer_score"] = (
     - candidates["avg_next3_fdr"].fillna(3.0) * 0.35
 )
 
-    )
+    
     best_transfers = candidates.sort_values("transfer_score", ascending=False).loc[:, [
         "name", "team_name", "position", "cost", "form", "points_per_game", "selected_by_percent", "avg_next3_fdr"
     ]].head(12).reset_index(drop=True)

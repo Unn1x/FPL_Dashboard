@@ -34,7 +34,6 @@ def ensure_user_squad_file(username):
             json.dump(base, f)
     return fn
 
-# no-op color function for FDR (we’ll apply styling in the table)
 def fdr_color_from_text(val):
     try:
         if val is None or val == "":
@@ -43,16 +42,16 @@ def fdr_color_from_text(val):
         if "(" in val and ")" in val:
             num = int(val.split("(")[1].split(")")[0])
             if num == 1:
-                return "background-color: #a1d99b"  # green
+                return "background-color: #a1d99b; color: black"  # green
             elif num == 2:
-                return "background-color: #ffffb2"  # yellow
+                return "background-color: #ffffb2; color: black"  # yellow
             elif num == 3:
-                return "background-color: #fdae6b"  # orange
+                return "background-color: #fdae6b; color: black"  # orange
             elif num >= 4:
-                return "background-color: #fcae91"  # red
+                return "background-color: #fcae91; color: black"  # red
     except Exception:
-        return ""
-    return ""
+        return "color: black"
+    return "color: black"
 
 # ----------------------------
 # Load FPL data
@@ -272,7 +271,7 @@ with tabs[4]:
             if v is not None:
                 vals.append(v)
         return sum(vals) / len(vals) if vals else None
-    work["avg_next3_fdr"] = work.apply(avg_next3, axis=1)
+    work["Average Next 3 Difficulty Rating"] = work.apply(avg_next3, axis=1)
 
     # Suggested Transfers
     candidates = work[~work["name"].isin(current_players)].copy()
